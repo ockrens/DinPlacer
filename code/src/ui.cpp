@@ -32,7 +32,7 @@
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
-// De constructor is nu weer clean en start de robot intern op
+// De constructor start de robot intern op en zet de basisstatussen klaar
 UIHandler::UIHandler(int windowWidth, int windowHeight, const char* title) {
     // 1. Window Setup
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
@@ -40,10 +40,15 @@ UIHandler::UIHandler(int windowWidth, int windowHeight, const char* title) {
     SetTargetFPS(60);
 
     // 2. Status initialisatie
-    isRobotConnected = false; // <--- Nu correct gedefinieerd via de header
+    isRobotConnected = false; 
+    isServerRunning = false;
+    lastMaxGrensEditMode = false;
 
     maxGrens = 30.0;
     maxGrensEditMode = false;
+    
+    // Vul de buffer met de initiale waarde om parsing-crashes te voorkomen
+    std::snprintf(maxGrensBuffer, sizeof(maxGrensBuffer), "%.1f", maxGrens);
 
     fb = { 0 };
     terminalScroll = { 0, 0 };
@@ -68,6 +73,23 @@ UIHandler::UIHandler(int windowWidth, int windowHeight, const char* title) {
     LogInfo("Systeem, Camera en RobotManager succesvol geïnitialiseerd.");
 }
 
+// DESTRUCTOR: Regelt de automatische en veilige resource cleanup (RAII)
+UIHandler::~UIHandler() {
+    // 1. Stop de server (zodat netwerk-sockets netjes sluiten)
+    if (robotServer.has_value()) {
+        robotServer->stop();
+    }
+
+    // 2. Wacht netjes tot de achtergronddraad klaar is met afsluiten
+    if (serverThread && serverThread->joinable()) {
+        serverThread->join();
+    }
+
+    // 3. Ruim Raylib-specifieke directory buffers en het window op
+    UnloadDirectoryFiles(fb.files);
+    CloseWindow();
+}
+
 void UIHandler::LogInfo(std::string msg) { logs.push_back({msg, DARKGRAY}); }
 void UIHandler::LogWarn(std::string msg) { logs.push_back({"[!] " + msg, ORANGE}); }
 void UIHandler::LogError(std::string msg) { logs.push_back({"[X] " + msg, RED}); }
@@ -90,23 +112,65 @@ Camera3D UIHandler::GetCamera() { return camera; }
 Camera3D* UIHandler::GetCameraPtr() { return &camera; }
 
 void UIHandler::Update() {
+    // --- BESTANDSBEHEER LOGICA ---
     if (!fb.result.empty()) {
         LogInfo("Bestand laden: " + fb.result);
-        
-        // Voer de DXF-inleeslogica dynamisch uit
         if (dxfManager.loadFile(fb.result.c_str())) {
             dxfManager.processBlocks(maxGrens);
             dxfManager.groupAndSortByRails(2);
             dxfManager.printFinalResults();
-            
             LogInfo("[OK] DXF succesvol ingelezen en gesorteerd.");
         } else {
             LogError("Kon het DXF-bestand niet openen of verwerken!");
         }
-
-        fb.result = ""; // Maak het resultaat leeg voor een volgende selectie
+        fb.result = ""; 
         terminalScroll.y = -((float)logs.size() * 20.0f); 
     }
+
+    // --- LIVE ROBOT STATUS CHECK ---
+    if (isRobotConnected && robot.has_value()) {
+        if (!robot->IsConnected()) {
+            isRobotConnected = false;
+            robot.reset(); 
+            LogError("Robot verbinding onverwacht verbroken!");
+        }
+    }
+
+    // --- LIVE ROBOT SERVER COMMUNICATIE ---
+    if (isServerRunning && robotServer.has_value()) {
+        if (isRobotConnected && robot.has_value()) {
+            try {
+                std::vector<double> iets = robot->GetRobotPose();
+                Pose current_pose = VectorToPose(iets);
+                robotServer->set_current_pose(current_pose);
+
+                if (robotServer->has_new_target_pose()) {
+                    Pose target_pose = robotServer->get_target_pose();
+                    std::vector<double> vec = PoseToVector(target_pose);
+                    robot->MoveToPose(vec); 
+                }
+            }
+            catch (const std::exception& e) {
+                LogError("Fout tijdens data-uitwisseling met server.");
+            }
+        }
+    }
+
+    // --- TEXTBOX INPUT VERWERKING ---
+    if (!maxGrensEditMode && lastMaxGrensEditMode) {
+        try {
+            double ingevoerdeWaarde = std::stod(maxGrensBuffer);
+            if (ingevoerdeWaarde != maxGrens) {
+                maxGrens = ingevoerdeWaarde;
+                LogInfo("Maximale grens aangepast naar: " + std::to_string(maxGrens));
+            }
+        }
+        catch (const std::exception& e) {
+            LogError("Ongeldige invoer! Grens hersteld.");
+            std::snprintf(maxGrensBuffer, sizeof(maxGrensBuffer), "%.1f", maxGrens);
+        }
+    }
+    lastMaxGrensEditMode = maxGrensEditMode;
 }
 
 void UIHandler::DrawDXF3D() {
@@ -145,14 +209,14 @@ void UIHandler::Render() {
 
     if (fb.show) GuiLock();
 
-    // --- SIDEBAR ---
+    // --- SIDEBAR PANEL ---
     GuiPanel({ 0, 0, sidebarW, sh }, "CONTROLS");
     float btnW = sidebarW - 40.0f;
     float btnH = dynamicFontSize * 2.5f; 
     
     if (GuiButton({ 20, 50, btnW, btnH }, "Bestand Openen")) fb.show = true;
 
-    // --- VERBINDINGSKNOP ---
+    // --- INTERACTIEVE VERBINDINGSKNOP (ROBOT) ---
     float connectBtnY = 50.0f + btnH + 15.0f; 
 
     if (!isRobotConnected) {
@@ -169,43 +233,64 @@ void UIHandler::Render() {
             }
         }
     } else {
-        GuiDisable(); 
-        GuiButton({ 20, connectBtnY, btnW, btnH }, "[ VERBONDEN ]");
-        GuiEnable();  
-    }
-        // In ui.cpp binnen UIHandler::Render():
-    // Bereken de Y-positie onder de verbindingsknop
-    float labelGrensY = connectBtnY + btnH + 20.0f;
-    float textBoxY = labelGrensY + dynamicFontSize + 5.0f;
-
-    // 1. Teken een label boven de textbox zodat de operator weet wat het is
-    DrawText("Maximale Grens:", 20, (int)labelGrensY, dynamicFontSize, DARKGRAY);
-
-    // 2. Teken de Raygui TextBox
-    // Als je op de textbox klikt, springt 'maxGrensEditMode' naar true en kun je typen.
-    // Als je er buiten klikt of op Enter drukt, springt hij terug naar false.
-    if (GuiTextBox({ 20, textBoxY, btnW, btnH }, maxGrensBuffer, sizeof(maxGrensBuffer), maxGrensEditMode)) {
-        maxGrensEditMode = !maxGrensEditMode; // Schakel edit-mode om bij klik
+        if (GuiButton({ 20, connectBtnY, btnW, btnH }, "[ DISCONNECT ROBOT ]")) {
+            LogWarn("Verbinding met robot handmatig verbroken.");
+            isRobotConnected = false;
+            robot.reset(); 
+        }
     }
 
-    // 3. Verwerk de invoer: Als de gebruiker klaar is met typen, zetten we de tekst om naar de double
-    if (!maxGrensEditMode) {
-        try {
-            // Converteer de text in de buffer veilig terug naar een double
-            double ingevoerdeWaarde = std::stod(maxGrensBuffer);
-            
-            // Controleer of de waarde echt veranderd is om onnodige logs te voorkomen
-            if (ingevoerdeWaarde != maxGrens) {
-                maxGrens = ingevoerdeWaarde;
-                LogInfo("Maximale grens aangepast naar: " + std::to_string(maxGrens));
+    // --- INTERACTIEVE SERVER KNOP ---
+    float serverBtnY = connectBtnY + btnH + 10.0f; 
+    
+    if (!isServerRunning) {
+        if (GuiButton({ 20, serverBtnY, btnW, btnH }, "Start Server (Port 5000)")) {
+            LogInfo("RobotServer opstarten op poort 5000...");
+            try {
+                robotServer.emplace(5000);
+                if (robotServer->start()) {
+                    serverThread = std::make_unique<std::thread>(&RobotServer::run, &(*robotServer));
+                    isServerRunning = true;
+                    LogInfo("[OK] Server draait succesvol op de achtergrond.");
+                } else {
+                    LogError("Server start mislukt! Is poort 5000 al bezet?");
+                    robotServer.reset();
+                }
+            } 
+            catch (const std::exception& e) {
+                LogError("Fout bij starten server: " + std::string(e.what()));
+                robotServer.reset();
             }
         }
-        catch (const std::exception& e) {
-            // Als de gebruiker letters typt in plaats van cijfers, herstellen we de oude waarde
-            std::snprintf(maxGrensBuffer, sizeof(maxGrensBuffer), "%.1f", maxGrens);
-        }
-    }
+    } else {
+        if (GuiButton({ 20, serverBtnY, btnW, btnH }, "[ STOP SERVER ]")) {
+            LogWarn("RobotServer handmatig stopgezet.");
+            isServerRunning = false;
+            
+            // 1. Schiet eerst de sockets lek, zodat de recv/accept deblokkeert!
+            if (robotServer.has_value()) {
+                robotServer->stop();
+            }
 
+            // 2. Wacht nu pas tot de achtergrondthread daadwerkelijk stopt
+            if (serverThread && serverThread->joinable()) {
+                serverThread->join();
+            }
+            
+            serverThread.reset();
+            robotServer.reset(); 
+        }
+    }   
+
+    // --- MAXIMALE GRENS INPUT ---
+    float labelGrensY = serverBtnY + btnH + 20.0f;
+    float textBoxY = labelGrensY + dynamicFontSize + 5.0f;
+
+    DrawText("Maximale Grens:", 20, (int)labelGrensY, dynamicFontSize, DARKGRAY);
+
+    if (GuiTextBox({ 20, textBoxY, btnW, btnH }, maxGrensBuffer, sizeof(maxGrensBuffer), maxGrensEditMode)) {
+        maxGrensEditMode = !maxGrensEditMode; 
+    }
 
     // --- TERMINAL OUTPUT ---
     Rectangle termBounds = { sidebarW, sh - termH, sw - sidebarW, termH };
@@ -227,7 +312,7 @@ void UIHandler::Render() {
     
     if (fb.show) GuiUnlock();
 
-    // --- FILE BROWSER WINDOW (HERSTELD & COMPLEET) ---
+    // --- FILE BROWSER WINDOW ---
     if (fb.show) {
         DrawRectangle(0, 0, (int)sw, (int)sh, Fade(BLACK, 0.3f));
         
@@ -239,50 +324,48 @@ void UIHandler::Render() {
 
         GuiLabel({ winRect.x + 10, winRect.y + 40, fbW - 20, (float)dynamicFontSize + 10 }, fb.currentPath.c_str());
         
-        // De lijst krijgt dynamisch de ruimte boven de knoppenrij
         Rectangle listRect = { winRect.x + 10, winRect.y + 75, fbW - 20, fbH - 145 };
+        
+        int oldActive = fb.activeIndex;
         GuiListView(listRect, fb.listText.c_str(), &fb.scrollIndex, &fb.activeIndex);
 
-        // Dynamische Y-positie voor de knoppenrij onderaan het popup-venster
+        if (fb.activeIndex != oldActive && fb.activeIndex >= 0 && GetGestureDetected() == GESTURE_DOUBLETAP) {
+            const char* selectedPath = fb.files.paths[fb.activeIndex];
+            if (DirectoryExists(selectedPath)) {
+                fb.currentPath = selectedPath;
+                UpdateBrowserFiles();
+            }
+        }
+
         float btnY = winRect.y + fbH - btnH - 15.0f;
         float browserBtnW = 130.0f;
 
-        // Knop 1: Map Omhoog (Links uitgelijnd)
         if (GuiButton({ winRect.x + 10, btnY, browserBtnW, btnH }, "#114# Omhoog")) {
             fb.currentPath = GetPrevDirectoryPath(fb.currentPath.c_str());
             UpdateBrowserFiles();
         }
 
-        // Knop 2: Contextknop voor Openen/Kiezen (Rechts uitgelijnd)
         if (fb.activeIndex >= 0 && fb.activeIndex < (int)fb.files.count) {
             const char* selectedPath = fb.files.paths[fb.activeIndex];
             bool isDir = DirectoryExists(selectedPath);
 
-            // Verander tekst dynamisch op basis van selectie: Map of Bestand
             if (GuiButton({ winRect.x + fbW - browserBtnW - 10, btnY, browserBtnW, btnH }, isDir ? "Map Openen" : "Bestand Kiezen")) {
                 if (isDir) {
                     fb.currentPath = selectedPath;
                     UpdateBrowserFiles();
                 } else {
-                    fb.result = selectedPath; // Dit triggert jouw DXFManager in Update()
+                    fb.result = selectedPath; 
                     fb.show = false;
                 }
             }
         } else {
-            // Toon een inactieve knop als er niks geselecteerd is
             GuiDisable();
             GuiButton({ winRect.x + fbW - browserBtnW - 10, btnY, browserBtnW, btnH }, "Kies Item");
             GuiEnable();
         }
 
-        // Knop 3: Sluiten (Naast de Openen/Kiezen knop)
         if (GuiButton({ winRect.x + fbW - (browserBtnW * 2) - 20, btnY, browserBtnW, btnH }, "Sluiten")) {
             fb.show = false;
         }
     }
-}
-
-
-void UIHandler::Cleanup() {
-    UnloadDirectoryFiles(fb.files);
 }

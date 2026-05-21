@@ -220,7 +220,6 @@ int main() {
     }
     
     // 4. Cleanup
-    UIHAND.Cleanup();
     CloseWindow();
     #endif
 

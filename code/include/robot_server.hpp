@@ -27,7 +27,7 @@ struct Pose
     float ry;
     float rz;
 };
-Pose VectorToPose(const std::vector<double>& vec)
+inline Pose VectorToPose(const std::vector<double>& vec)
 {
     if (vec.size() != 6)
     {
@@ -43,7 +43,7 @@ Pose VectorToPose(const std::vector<double>& vec)
         static_cast<float>(vec[5])
     };
 }
-std::vector<double> PoseToVector(const Pose& pose)
+inline std::vector<double> PoseToVector(const Pose& pose)
 {
     return {
         static_cast<double>(pose.x),
@@ -146,14 +146,28 @@ public:
         running = false;
 
     #ifdef _WIN32
-        shutdown(client_fd, SD_BOTH);  // 🔥 BELANGRIJK
-        closesocket(client_fd);
-        closesocket(server_fd);
+        // Sluit eerst de client verbinding als die er is
+        if (client_fd != -1) {
+            shutdown(client_fd, SD_BOTH);
+            closesocket(client_fd);
+            client_fd = -1;
+        }
+        // Sluit de server socket om een blokkerende 'accept()' te breken
+        if (server_fd != -1) {
+            closesocket(server_fd);
+            server_fd = -1;
+        }
         WSACleanup();
     #else
-        shutdown(client_fd, SHUT_RDWR);
-        close(client_fd);
-        close(server_fd);
+        if (client_fd != -1) {
+            shutdown(client_fd, SHUT_RDWR);
+            close(client_fd);
+            client_fd = -1;
+        }
+        if (server_fd != -1) {
+            close(server_fd);
+            server_fd = -1;
+        }
     #endif
     }
 

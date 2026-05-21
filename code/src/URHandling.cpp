@@ -48,3 +48,8 @@ void RobotManager::MoveToPose(const std::vector<double>& pose) {
 
 void RobotManager::ClickIn() {}
 void RobotManager::PickupComponent() {}
+
+bool RobotManager::IsConnected() {
+    // ur_rtde geeft true/false terug op basis van de socket status
+    return control.isConnected() && receive.isConnected();
+}
