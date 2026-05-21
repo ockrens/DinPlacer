@@ -117,8 +117,9 @@ void UIHandler::Update() {
         LogInfo("Bestand laden: " + fb.result);
         if (dxfManager.loadFile(fb.result.c_str())) {
             dxfManager.processBlocks(maxGrens);
-            dxfManager.groupAndSortByRails(2);
+            dxfManager.groupAndSortByRails(0.02);
             dxfManager.printFinalResults();
+            LogInfo("Gedetecteerde eenheid: " + dxfManager.getUnitsString());
             LogInfo("[OK] DXF succesvol ingelezen en gesorteerd.");
         } else {
             LogError("Kon het DXF-bestand niet openen of verwerken!");
@@ -175,15 +176,21 @@ void UIHandler::Update() {
 
 void UIHandler::DrawDXF3D() {
     for (const auto& b : dxfManager.finalBlocks) {
-        Vector3 center = { (float)b.centerX * DXF_SCALE, 0.0f, (float)b.centerY * DXF_SCALE };
+        // Center coördinaten worden nu netjes opgeschaald vanuit meters
+        Vector3 center = { (float)b.centerX * UI_Scale, 0.0f, (float)b.centerY * UI_Scale };
         
-        float width = (float)(b.maxX - b.minX) * DXF_SCALE;
-        float length = (float)(b.maxY - b.minY) * DXF_SCALE;
-        float height = 0.1f; 
+        // Breedte en lengte (staan in meters) worden nu ook correct opgeschaald
+        float width = (float)(b.maxX - b.minX) * UI_Scale;
+        float length = (float)(b.maxY - b.minY) * UI_Scale;
+        
+        // Geef het blok een vaste dikte in Raylib eenheden (bijv. 1.0f) zodat het goed zichtbaar is
+        float height = 0.2f; 
 
+        // Teken de 3D kubus en de identificatielijn
         DrawCubeWires(center, width, height, length, LIME);
-        DrawLine3D(center, {center.x, center.y + 0.5f, center.z}, RED);
+        DrawLine3D(center, {center.x, center.y + 2.0f, center.z}, RED); // Lijn iets langer gemaakt
 
+        // Teken de labels op het scherm
         Vector2 screenPos = GetWorldToScreen(center, camera);
         if (screenPos.x > 0 && screenPos.y > 0) {
             DrawText(b.label.c_str(), (int)screenPos.x, (int)screenPos.y, 10, DARKGRAY);

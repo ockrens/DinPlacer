@@ -12,7 +12,7 @@
 #include "URHandling.hpp" // Sluit je schone robot header hier aan
 #include "robot_server.hpp"
 
-#define DXF_SCALE 0.1f
+#define UI_Scale 10.0f
 
 struct LogEntry { 
     std::string text;

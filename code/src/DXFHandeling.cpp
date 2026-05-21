@@ -3,6 +3,24 @@
 #include <iostream>
 #include <cmath> // Voor std::abs
 
+// --- STAP 0: HEADER / MAATVOERING UITLEZEN ---
+
+void DXFManager::setVariableInt(const std::string& key, int value, int code) {
+    if (key == "$INSUNITS") {
+        dxfUnits = value;
+    }
+}
+
+std::string DXFManager::getUnitsString() const {
+    switch (dxfUnits) {
+        case 1:  return "Inches";
+        case 4:  return "Millimeters (mm)";
+        case 5:  return "Centimeters (cm)";
+        case 6:  return "Meters (m)";
+        default: return "Onbekend / Niet gespecificeerd (Default cm)";
+    }
+}
+
 // --- STAP 1: BIBLIOTHEEK VULLEN (Blauwdrukken) ---
 
 void DXFManager::addBlock(const DL_BlockData& data) {
@@ -46,17 +64,31 @@ void DXFManager::addAttribute(const DL_AttributeData& data) {
     }
 }
 
-// --- STAP 3: DATA VERWERKEN (Spiegelen & Filteren) ---
+// --- STAP 3: DATA VERWERKEN (Naar Meters Converteren, Spiegelen & Filteren) ---
 
 bool DXFManager::loadFile(const std::string& filename) {
     DL_Dxf dxf;
+    dxfUnits = 0; 
     return dxf.in(filename, this);
 }
 
 void DXFManager::processBlocks(double maxGrens) {
     if (tempPoints.empty()) return;
 
-    // We bepalen eerst de uitersten van de ruwe data
+    // Bepaal de conversiefactor naar METERS op basis van de DXF-eenheid
+    double toMetersFactor = 0.01; // Default: ga uit van cm (1 mm = 0.01 m)
+    if (dxfUnits == 5) {
+        toMetersFactor = 0.01;   // Centimeters naar Meters
+    } else if (dxfUnits == 6) {
+        toMetersFactor = 1.0;    // Al in Meters
+    } else if (dxfUnits == 1) {
+        toMetersFactor = 0.0254; // Inches naar Meters
+    }
+    else if (dxfUnits == 4) {
+        toMetersFactor = 0.001;  // Millimeters naar Meters
+    }
+
+    // Bepaal eerst de uitersten van de ruwe data
     double gMinX = tempPoints[0].x; double gMaxX = tempPoints[0].x;
     double gMinY = tempPoints[0].y; double gMaxY = tempPoints[0].y;
     for (const auto& p : tempPoints) {
@@ -72,25 +104,29 @@ void DXFManager::processBlocks(double maxGrens) {
 
         size_t j = i;
         while (j < tempPoints.size() && tempPoints[j].instanceID == currentID) {
-            // --- X EN Y COÖRDINATEN TERUGGEDRAAID ---
-            // DXF X-data stuurt nu weer jouw X-as aan (min gMinX om bij 0 te beginnen)
-            // DXF Y-data stuurt nu weer jouw Y-as aan (gMaxY - p.y voor de verticale spiegeling)
+            // Spiegelen en verschuiven naar nulpunt
             double correctedX = tempPoints[j].x - gMinX;
             double correctedY = gMaxY - tempPoints[j].y;
 
-            bMinX = std::min(bMinX, correctedX); bMaxX = std::max(bMaxX, correctedX);
-            bMinY = std::min(bMinY, correctedY); bMaxY = std::max(bMaxY, correctedY);
+            // DIRECT OMREKENEN NAAR METERS (Zonder afronding naar gehele ints, behoud double precisie!)
+            double meterX = correctedX * toMetersFactor;
+            double meterY = correctedY * toMetersFactor;
+
+            bMinX = std::min(bMinX, meterX); bMaxX = std::max(bMaxX, meterX);
+            bMinY = std::min(bMinY, meterY); bMaxY = std::max(bMaxY, meterY);
             j++;
         }
 
-        // --- STAP 3B: FILTERING OP GROOTTE ---
+        // De filtergrens (maxGrens) wordt nu ook omgetoverd naar meters voor de vergelijking
+        double maxGrensInMeters = maxGrens * toMetersFactor;
         double breedte = bMaxX - bMinX;
         double hoogte = bMaxY - bMinY;
 
-        if (breedte > maxGrens || hoogte > maxGrens) {
+        if (breedte > maxGrensInMeters || hoogte > maxGrensInMeters) {
             i = j;
             continue;
         }
+
         BlockResult res;
         res.label = (tempPoints[i].label == "ONBEKEND") ? (tempPoints[i].type + "_" + std::to_string(currentID)) : tempPoints[i].label;
         res.type = tempPoints[i].type;
@@ -120,6 +156,7 @@ void DXFManager::groupAndSortByRails(double yThreshold) {
         double currentRailY = sortedY[0].centerY;
 
         for (const auto& b : sortedY) {
+            // Let op: yThreshold moet nu in METERS worden meegegeven (bijv. 0.02 voor 2cm)
             if (std::abs(b.centerY - currentRailY) > yThreshold) {
                 railIndex++;
                 currentRailY = b.centerY;
@@ -136,11 +173,12 @@ void DXFManager::groupAndSortByRails(double yThreshold) {
 }
 
 void DXFManager::printFinalResults() const {
-    std::cout << "\n--- GEVONDEN RAILS ---" << std::endl;
+    std::cout << "\n--- GEVONDEN RAILS (Opgeslagen in METERS voor Robot) ---" << std::endl;
     for (auto const& [id, lijst] : rails) {
         std::cout << "RAIL " << id << " (" << lijst.size() << " componenten):" << std::endl;
         for (const auto& c : lijst) {
-            std::cout << "  -> " << c.type << " op X: " << (int)c.centerX << " Y: " << (int)c.centerY << std::endl;
+            // Print met floating-point precisie
+            std::cout << "  -> " << c.type << " op X: " << c.centerX << " m, Y: " << c.centerY << " m" << std::endl;
         }
     }
 }

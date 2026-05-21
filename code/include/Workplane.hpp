@@ -1,6 +1,7 @@
 #ifndef WORKPLANE_HPP
 #define WORKPLANE_HPP
-
+#include <vector>
+#include <string>
 #include "raylib.h"
 
 // 1. De Wiskunde-motor voor 4x4 matrices
