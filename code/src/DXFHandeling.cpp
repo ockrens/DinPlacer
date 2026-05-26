@@ -75,20 +75,16 @@ bool DXFManager::loadFile(const std::string& filename) {
 void DXFManager::processBlocks(double maxGrens) {
     if (tempPoints.empty()) return;
 
-    // Bepaal de conversiefactor naar METERS op basis van de DXF-eenheid
-    double toMetersFactor = 0.01; // Default: ga uit van cm (1 mm = 0.01 m)
-    if (dxfUnits == 5) {
-        toMetersFactor = 0.01;   // Centimeters naar Meters
-    } else if (dxfUnits == 6) {
-        toMetersFactor = 1.0;    // Al in Meters
-    } else if (dxfUnits == 1) {
-        toMetersFactor = 0.0254; // Inches naar Meters
-    }
-    else if (dxfUnits == 4) {
-        toMetersFactor = 0.001;  // Millimeters naar Meters
-    }
+    // 1. Conversiefactor naar METERS bepalen (Standaard cm fallback)
+    double toMetersFactor = 0.01; 
+    if (dxfUnits == 4)      toMetersFactor = 0.001;  // mm naar m
+    else if (dxfUnits == 5) toMetersFactor = 0.01;   // cm naar m
+    else if (dxfUnits == 6) toMetersFactor = 1.0;    // m naar m
+    else if (dxfUnits == 1) toMetersFactor = 0.0254; // inch naar m
 
-    // Bepaal eerst de uitersten van de ruwe data
+    double maxGrensInMeters = maxGrens * toMetersFactor;
+
+    // STAP 1: BEPAAL DE ABSOLUTE GEOMETRISCHE GRENZEN VAN HET DOCUMENT
     double gMinX = tempPoints[0].x; double gMaxX = tempPoints[0].x;
     double gMinY = tempPoints[0].y; double gMaxY = tempPoints[0].y;
     for (const auto& p : tempPoints) {
@@ -96,49 +92,105 @@ void DXFManager::processBlocks(double maxGrens) {
         gMinY = std::min(gMinY, p.y); gMaxY = std::max(gMaxY, p.y);
     }
 
-    finalBlocks.clear();
+    // Hulplogica om componenten tijdelijk in meters op te slaan
+    struct RawComp {
+        std::string label; std::string type; int id;
+        double rMinX, rMaxX, rMinY, rMaxY;
+    };
+    std::vector<RawComp> allComponents;
+
     size_t i = 0;
     while (i < tempPoints.size()) {
         int currentID = tempPoints[i].instanceID;
-        double bMinX = 1e15, bMaxX = -1e15, bMinY = 1e15, bMaxY = -1e15;
+        double rMinX = 1e15, rMaxX = -1e15, rMinY = 1e15, rMaxY = -1e15;
 
         size_t j = i;
         while (j < tempPoints.size() && tempPoints[j].instanceID == currentID) {
-            // Spiegelen en verschuiven naar nulpunt
-            double correctedX = tempPoints[j].x - gMinX;
-            double correctedY = gMaxY - tempPoints[j].y;
+            // --- GECORRIGEERD: GEEN VERTICALE SPIEGELING MEER ---
+            // We behouden de natuurlijke CAD Y-as richting (omhoog = positief)
+            double posX = (tempPoints[j].x - gMinX) * toMetersFactor;
+            double posY = (tempPoints[j].y - gMinY) * toMetersFactor;
 
-            // DIRECT OMREKENEN NAAR METERS (Zonder afronding naar gehele ints, behoud double precisie!)
-            double meterX = correctedX * toMetersFactor;
-            double meterY = correctedY * toMetersFactor;
-
-            bMinX = std::min(bMinX, meterX); bMaxX = std::max(bMaxX, meterX);
-            bMinY = std::min(bMinY, meterY); bMaxY = std::max(bMaxY, meterY);
+            rMinX = std::min(rMinX, posX); rMaxX = std::max(rMaxX, posX);
+            rMinY = std::min(rMinY, posY); rMaxY = std::max(rMaxY, posY);
             j++;
         }
 
-        // De filtergrens (maxGrens) wordt nu ook omgetoverd naar meters voor de vergelijking
-        double maxGrensInMeters = maxGrens * toMetersFactor;
-        double breedte = bMaxX - bMinX;
-        double hoogte = bMaxY - bMinY;
-
-        if (breedte > maxGrensInMeters || hoogte > maxGrensInMeters) {
-            i = j;
-            continue;
-        }
-
-        BlockResult res;
-        res.label = (tempPoints[i].label == "ONBEKEND") ? (tempPoints[i].type + "_" + std::to_string(currentID)) : tempPoints[i].label;
-        res.type = tempPoints[i].type;
-        res.minX = bMinX; res.minY = bMinY; res.maxX = bMaxX; res.maxY = bMaxY;
-        res.centerX = (bMinX + bMaxX) / 2.0;
-        res.centerY = (bMinY + bMaxY) / 2.0;
-        
-        finalBlocks.push_back(res);
+        RawComp c;
+        c.label = (tempPoints[i].label == "ONBEKEND") ? (tempPoints[i].type + "_" + std::to_string(currentID)) : tempPoints[i].label;
+        c.type = tempPoints[i].type;
+        c.id = currentID;
+        c.rMinX = rMinX; c.rMaxX = rMaxX; c.rMinY = rMinY; c.rMaxY = rMaxY;
+        allComponents.push_back(c);
         i = j;
     }
+
+    // STAP 2: FILTER DE PAGINARAND ERUIT
+    std::vector<RawComp> nonPageComponents;
+    double documentMaxX = (gMaxX - gMinX) * toMetersFactor;
+    double documentMaxY = (gMaxY - gMinY) * toMetersFactor;
+
+    for (const auto& c : allComponents) {
+        bool touchesLeft   = (c.rMinX < 0.001);
+        bool touchesRight  = (c.rMaxX > documentMaxX - 0.001);
+        bool touchesBottom = (c.rMinY < 0.001);
+        bool touchesTop    = (c.rMaxY > documentMaxY - 0.001);
+
+        if (touchesLeft && touchesRight && touchesBottom && touchesTop) {
+            continue; // Paginarand weggooien
+        }
+        nonPageComponents.push_back(c);
+    }
+
+    if (nonPageComponents.empty()) {
+        panelWidthMeters = 0.0; panelHeightMeters = 0.0;
+        finalBlocks.clear(); tempPoints.clear();
+        return;
+    }
+
+    // STAP 3: BEREKEN DE BOUNDING BOX VAN DE OVERGEBLEVEN DELEN (HET PANEEL)
+    double compMinX = 1e15;  double compMaxX = -1e15;
+    double compMinY = 1e15;  double compMaxY = -1e15;
+    for (const auto& c : nonPageComponents) {
+        compMinX = std::min(compMinX, c.rMinX);
+        compMaxX = std::max(compMaxX, c.rMaxX);
+        compMinY = std::min(compMinY, c.rMinY);
+        compMaxY = std::max(compMaxY, c.rMaxY);
+    }
+
+    // De grootte van de achterplaat sluit nu perfect aan
+    panelWidthMeters = compMaxX - compMinX;
+    panelHeightMeters = compMaxY - compMinY;
+
+    // STAP 4: TRANSFORMEER NAAR HET ZUIVERE POSITIEVE ASSENSTELSEL & FILTER OP GROOTTE
+    finalBlocks.clear();
+    for (const auto& c : nonPageComponents) {
+        double tMinX = c.rMinX - compMinX;
+        double tMaxX = c.rMaxX - compMinX;
+        double tMinY = c.rMinY - compMinY;
+        double tMaxY = c.rMaxY - compMinY;
+
+        double breedte = tMaxX - tMinX;
+        double hoogte = tMaxY - tMinY;
+
+        if (breedte <= maxGrensInMeters && hoogte <= maxGrensInMeters) {
+            BlockResult res;
+            res.label = c.label;
+            res.type = c.type;
+            res.minX = tMinX;
+            res.maxX = tMaxX;
+            res.minY = tMinY;
+            res.maxY = tMaxY;
+            res.centerX = (tMinX + tMaxX) / 2.0;
+            res.centerY = (tMinY + tMaxY) / 2.0;
+            finalBlocks.push_back(res);
+        }
+    }
+
     tempPoints.clear();
 }
+
+
 
 // --- STAP 4: RAILS SORTEREN (Groeperen en van Links naar Rechts) ---
 

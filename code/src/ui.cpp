@@ -64,14 +64,17 @@ UIHandler::UIHandler(int windowWidth, int windowHeight, const char* title) {
     UpdateBrowserFiles();
 
     // 4. 3D World Camera Setup
-    camera.position = (Vector3){ 0.0f, 50.0f, 0.0f }; 
+    camera.position = (Vector3){ 0.0f, 0.0f, 15.0f }; 
     camera.target = (Vector3){ 0.0f, 0.0f, 0.0f };   
-    camera.up = (Vector3){ 0.0f, 0.0f, -1.0f };       
+    camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };       
     camera.fovy = 45.0f;                             
     camera.projection = CAMERA_PERSPECTIVE;          
 
+    currentCameraMode = MODE_3D;
+
     LogInfo("Systeem, Camera en RobotManager succesvol geïnitialiseerd.");
 }
+
 
 // DESTRUCTOR: Regelt de automatische en veilige resource cleanup (RAII)
 UIHandler::~UIHandler() {
@@ -117,10 +120,12 @@ void UIHandler::Update() {
         LogInfo("Bestand laden: " + fb.result);
         if (dxfManager.loadFile(fb.result.c_str())) {
             dxfManager.processBlocks(maxGrens);
+            
+            // Sorteer drempelwaarde in METERS (0.02 meter = 2 cm)
             dxfManager.groupAndSortByRails(0.02);
             dxfManager.printFinalResults();
-            LogInfo("Gedetecteerde eenheid: " + dxfManager.getUnitsString());
             LogInfo("[OK] DXF succesvol ingelezen en gesorteerd.");
+            LogInfo("Gedetecteerde eenheid: " + dxfManager.getUnitsString());
         } else {
             LogError("Kon het DXF-bestand niet openen of verwerken!");
         }
@@ -172,31 +177,99 @@ void UIHandler::Update() {
         }
     }
     lastMaxGrensEditMode = maxGrensEditMode;
-}
 
-void UIHandler::DrawDXF3D() {
-    for (const auto& b : dxfManager.finalBlocks) {
-        // Center coördinaten worden nu netjes opgeschaald vanuit meters
-        Vector3 center = { (float)b.centerX * UI_Scale, 0.0f, (float)b.centerY * UI_Scale };
-        
-        // Breedte en lengte (staan in meters) worden nu ook correct opgeschaald
-        float width = (float)(b.maxX - b.minX) * UI_Scale;
-        float length = (float)(b.maxY - b.minY) * UI_Scale;
-        
-        // Geef het blok een vaste dikte in Raylib eenheden (bijv. 1.0f) zodat het goed zichtbaar is
-        float height = 0.2f; 
+    // --- CAMERAMODE LOGICA ---
+    if (currentCameraMode == MODE_3D) {
+        float sw = (float)GetScreenWidth();
+        float sidebarW = sw * 0.20f;
+        if (sidebarW < 180.0f) sidebarW = 180.0f;
 
-        // Teken de 3D kubus en de identificatielijn
-        DrawCubeWires(center, width, height, length, LIME);
-        DrawLine3D(center, {center.x, center.y + 2.0f, center.z}, RED); // Lijn iets langer gemaakt
+        Vector2 mousePos = GetMousePosition();
 
-        // Teken de labels op het scherm
-        Vector2 screenPos = GetWorldToScreen(center, camera);
-        if (screenPos.x > 0 && screenPos.y > 0) {
-            DrawText(b.label.c_str(), (int)screenPos.x, (int)screenPos.y, 10, DARKGRAY);
+        // Hover-beveiliging: Update camera alleen buiten het menu en als de browser dicht is
+        if (mousePos.x > sidebarW && !fb.show) {
+            UpdateCamera(&camera, CAMERA_FREE); 
+        }
+    } 
+    else if (currentCameraMode == MODE_2D_FRONT) {
+        if (dxfManager.panelWidthMeters > 0 && dxfManager.panelHeightMeters > 0) {
+            float pWidth = (float)dxfManager.panelWidthMeters * DXF_SCALE;
+            float pHeight = (float)dxfManager.panelHeightMeters * DXF_SCALE;
+            
+            // 1. Bereken het exacte middelpunt van het paneel
+            Vector3 panelCenter = { -pWidth / 2.0f, pHeight / 2.0f, 0.0f };
+
+            // 2. Bereken het bruikbare schermvlak (alles boven de terminal)
+            float sw = (float)GetScreenWidth();
+            float sh = (float)GetScreenHeight();
+            float termH = sh * 0.25f;
+            if (termH < 100.0f) termH = 100.0f;
+            
+            float usableScreenHeight = sh - termH;
+
+            // 3. Bereken de perfecte zoomfactor (fovy) voor orthografische modus
+            float zoomFactorHeight = pHeight * (sh / usableScreenHeight) * 1.15f;
+            float zoomFactorWidth = pWidth * (sh / sw) * 1.15f;
+            
+            float targetFovy = (zoomFactorHeight > zoomFactorWidth) ? zoomFactorHeight : zoomFactorWidth;
+
+            // 4. Bereken de verticale verschuiving om het paneel omhoog te duwen boven de terminal
+            float terminalRatio = termH / sh;
+            float targetOffsetY = pHeight * (terminalRatio * 0.5f);
+            
+            Vector3 adjustedTarget = { panelCenter.x, panelCenter.y - targetOffsetY, 0.0f };
+
+            // 5. Toepassen van de vlakke orthografische camera-instellingen
+            camera.target = adjustedTarget;
+            camera.position = { adjustedTarget.x, adjustedTarget.y, 20.0f }; 
+            camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };                 
+            camera.fovy = targetFovy;                                         
+            camera.projection = CAMERA_ORTHOGRAPHIC;                          
         }
     }
 }
+
+
+void UIHandler::DrawDXF3D() {
+    float pWidth = (float)dxfManager.panelWidthMeters * DXF_SCALE;
+    float pHeight = (float)dxfManager.panelHeightMeters * DXF_SCALE;
+    float pThickness = 0.05f * DXF_SCALE;
+
+    // --- STAP A: TEKEN HET COMPACTE DXF NULPUNT (0,0) ---
+    float axisLength = 0.10f; 
+    
+    DrawLine3D({0, 0, 0}, {axisLength * DXF_SCALE, 0, 0}, RED); 
+    DrawLine3D({0, 0, 0}, {0, axisLength * DXF_SCALE, 0}, LIME);
+    DrawLine3D({0, 0, 0}, {0, 0, axisLength * DXF_SCALE}, BLUE);
+    
+    DrawSphere({0, 0, 0}, 0.05f * DXF_SCALE, GOLD);
+
+    // --- STAP B: WIREFRAME VAN DE ACHTERKANT VAN HET PANEEL ---
+    if (dxfManager.panelWidthMeters > 0 && dxfManager.panelHeightMeters > 0) {
+        Vector3 panelCenter = { -pWidth / 2.0f, pHeight / 2.0f, -pThickness / 2.0f };
+        DrawCubeWires(panelCenter, pWidth, pHeight, pThickness, DARKGRAY);
+    }
+
+    // --- STAP C: DE COMPONENTEN RECHTSTREEKS RENDEREN OP HET XY-VLAK ---
+    for (const auto& b : dxfManager.finalBlocks) {
+        Vector3 center = { ((float)b.centerX * DXF_SCALE) - pWidth, (float)b.centerY * DXF_SCALE, 0.0f };
+        
+        float width = (float)(b.maxX - b.minX) * DXF_SCALE;
+        float length = (float)(b.maxY - b.minY) * DXF_SCALE; 
+        float height = 0.4f;                                 
+
+        center.z += height / 2.0f;
+
+        DrawCubeWires(center, width, length, height, LIME);
+        DrawLine3D({center.x, center.y, 0.0f}, {center.x, center.y, center.z + height}, RED);
+
+        Vector2 screenPos = GetWorldToScreen(center, camera);
+        if (screenPos.x > 0 && screenPos.y > 0) {
+            DrawText(b.label.c_str(), (int)screenPos.x, (int)screenPos.y, 11, MAROON);
+        }
+    }
+}
+
 
 void UIHandler::Render() {
     float sw = (float)GetScreenWidth();
@@ -274,12 +347,10 @@ void UIHandler::Render() {
             LogWarn("RobotServer handmatig stopgezet.");
             isServerRunning = false;
             
-            // 1. Schiet eerst de sockets lek, zodat de recv/accept deblokkeert!
             if (robotServer.has_value()) {
                 robotServer->stop();
             }
 
-            // 2. Wacht nu pas tot de achtergrondthread daadwerkelijk stopt
             if (serverThread && serverThread->joinable()) {
                 serverThread->join();
             }
@@ -299,11 +370,41 @@ void UIHandler::Render() {
         maxGrensEditMode = !maxGrensEditMode; 
     }
 
+    // --- CAMERA MODUS SELECTIE KNOPPEN ---
+    float cameraBtnY = textBoxY + btnH + 20.0f;
+
+    DrawText("Camera Weergave:", 20, (int)cameraBtnY, dynamicFontSize, DARKGRAY);
+    float modeBtnY = cameraBtnY + dynamicFontSize + 5.0f;
+
+    if (currentCameraMode == MODE_3D) GuiSetState(STATE_PRESSED);
+    if (GuiButton({ 20, modeBtnY, btnW, btnH }, "Vrije 3D Modus")) {
+        currentCameraMode = MODE_3D;
+        
+        camera.projection = CAMERA_PERSPECTIVE; 
+        camera.fovy = 45.0f; 
+        camera.position = (Vector3){ 0.0f, 0.0f, 15.0f };
+        camera.target = (Vector3){ 0.0f, 0.0f, 0.0f };
+        camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+        
+        LogInfo("Camera omgeschakeld naar Vrije 3D Beweging (WASD).");
+    }
+    GuiSetState(STATE_NORMAL); 
+
+    float frontBtnY = modeBtnY + btnH + 10.0f;
+    if (currentCameraMode == MODE_2D_FRONT) GuiSetState(STATE_PRESSED);
+    if (GuiButton({ 20, frontBtnY, btnW, btnH }, "Vooraanzicht")) {
+        currentCameraMode = MODE_2D_FRONT;
+        LogInfo("Camera vergrendeld op Vooraanzicht van het paneel.");
+    }
+    GuiSetState(STATE_NORMAL); 
+
     // --- TERMINAL OUTPUT ---
     Rectangle termBounds = { sidebarW, sh - termH, sw - sidebarW, termH };
     float lineSpacing = dynamicFontSize + 6.0f; 
     Rectangle content = { sidebarW, sh - termH, sw - sidebarW - 15, (float)logs.size() * lineSpacing + 20.0f };
     Rectangle view = { 0 };
+
+    DrawRectangleRec(termBounds, GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
     GuiPanel(termBounds, "TERMINAL OUTPUT");
     GuiScrollPanel(termBounds, NULL, content, &terminalScroll, &view);

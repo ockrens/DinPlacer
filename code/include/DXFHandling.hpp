@@ -37,6 +37,8 @@ private:
     // Slaat de ruwe $INSUNITS waarde op uit de DXF header
     int dxfUnits = 0; 
 
+
+
 public:
     std::vector<BlockResult> finalBlocks;
     std::map<int, std::vector<BlockResult>> rails;
@@ -61,6 +63,9 @@ public:
     // --- EXTRA UTILITIES ---
     std::string getUnitsString() const; 
     int getRawUnits() const { return dxfUnits; }
+
+    double panelWidthMeters = 0.0;
+    double panelHeightMeters = 0.0;
 };
 
 #endif
