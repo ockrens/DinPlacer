@@ -1,28 +1,36 @@
-
 #ifndef RTDE_EXPORT_H
 #define RTDE_EXPORT_H
 
-#ifdef RTDE_STATIC_DEFINE
-#  define RTDE_EXPORT
-#  define RTDE_NO_EXPORT
-#else
-#  ifndef RTDE_EXPORT
-#    ifdef rtde_EXPORTS
-        /* We are building this library */
-#      define RTDE_EXPORT __declspec(dllexport)
-#    else
-        /* We are using this library */
-#      define RTDE_EXPORT __declspec(dllimport)
+// Controleer of we op Windows compileren
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+#  ifdef RTDE_STATIC_DEFINE
+#    define RTDE_EXPORT
+#    define RTDE_NO_EXPORT
+#  else
+#    ifndef RTDE_EXPORT
+#      ifdef rtde_EXPORTS
+          /* We are building this library */
+#        define RTDE_EXPORT __declspec(dllexport)
+#      else
+          /* We are using this library */
+#        define RTDE_EXPORT __declspec(dllimport)
+#      endif
+#    endif
+#    ifndef RTDE_NO_EXPORT
+#      define RTDE_NO_EXPORT 
 #    endif
 #  endif
-
-#  ifndef RTDE_NO_EXPORT
-#    define RTDE_NO_EXPORT 
+#  ifndef RTDE_DEPRECATED
+#    define RTDE_DEPRECATED __declspec(deprecated)
 #  endif
-#endif
-
-#ifndef RTDE_DEPRECATED
-#  define RTDE_DEPRECATED __declspec(deprecated)
+#else
+  // --- LINUX CONFIGURATIE (WSL & RASPBERRY PI) ---
+  // Op Linux moeten deze Windows-macros volledig leeg zijn!
+#  define RTDE_EXPORT
+#  define RTDE_NO_EXPORT
+#  ifndef RTDE_DEPRECATED
+#    define RTDE_DEPRECATED __attribute__ ((deprecated))
+#  endif
 #endif
 
 #ifndef RTDE_DEPRECATED_EXPORT

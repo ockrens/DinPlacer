@@ -7,7 +7,7 @@
             "command": "cmake",
             "args": [
                 "-S", ".",
-                "-B", "out/build/good",
+                "-B", "build_win",
                 "-G", "MinGW Makefiles",
                 "-D", "CMAKE_C_COMPILER=C:/msys64/mingw64/bin/gcc.exe",
                 "-D", "CMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe",
@@ -19,18 +19,30 @@
             "label": "2. CMake Build",
             "type": "process",
             "command": "cmake",
-            "args": [ "--build", "out/build/good" ],
+            "args": [ "--build", "build_win" ],
             "dependsOn": "1. CMake Configure"
         },
         {
             "label": "Build & Run Raylib App",
             "type": "process",
-            "command": "${workspaceFolder}/out/build/good/code.exe",
+            "command": "${workspaceFolder}/build_win/DinPlacer.exe",
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
             "dependsOn": "2. CMake Build"
+        },
+        {
+            "label": "Alleen Build",
+            "type": "process",
+            "command": "cmake",
+            "args": [ "--build", "build_win" ],
+            "group": "build"
+        },
+        {
+            "label": "Alleen Run",
+            "type": "process",
+            "command": "${workspaceFolder}/build_win/DinPlacer.exe"
         }
     ]
 }

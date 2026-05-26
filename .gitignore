@@ -1,2 +1,6 @@
-code/out/
+code/build/
+code/build_win/
+code/build_wsl/
 code/**/*.exe
+code/.mcp.json
+code/lib/linux/librtde.so.1.6
